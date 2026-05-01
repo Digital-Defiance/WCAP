@@ -1,0 +1,814 @@
+<h1 id="web-content-authenticity-protocol-wcap">Web Content Authenticity
+Protocol (WCAP)</h1>
+<p><strong>Version 0.3 – Draft</strong> <strong>Status of This
+Memo</strong> This document specifies a proposed protocol for the
+Internet community and requests discussion and suggestions for
+improvement. Distribution of this memo is unlimited.</p>
+<hr />
+<h2 id="abstract">Abstract</h2>
+<p>This document defines the Web Content Authenticity Protocol (WCAP), a
+mechanism for ensuring the end-to-end authenticity and integrity of web
+resources. WCAP is designed to be transport-agnostic, meaning it can
+verify content regardless of how it was delivered—via HTTP, peer-to-peer
+networks, or other channels. By using digital signatures, WCAP allows a
+verifier to cryptographically confirm that a resource is exactly what
+the originator intended to publish, and has not been tampered with by
+any intermediary, including compromised servers, state-level actors, or
+malicious networks. This provides a powerful guarantee against
+censorship, manipulation, and unauthorized modification of information.
+Version 0.3 extends the protocol with an optional Signing Policy
+Declaration mechanism, allowing Signers to declare what they verified
+about content provenance and integrity before signing, enabling
+verifiers to distinguish transport-integrity-only signatures from
+signatures backed by deeper content verification.</p>
+<hr />
+<h2 id="introduction">1. Introduction</h2>
+<p>While Transport Layer Security (TLS) provides a secure channel
+between a client and a server, it does not protect content once it has
+been delivered or if an intermediary in the chain (such as a CDN or
+proxy) is compromised. The Web Content Authenticity Protocol (WCAP)
+provides a mechanism for a web server (the <strong>Signer</strong>) to
+digitally sign web resources, allowing a client (the
+<strong>Verifier</strong>) to confirm that the content is exactly what
+the origin server intended to send.</p>
+<p>The key words “MUST”, “MUST NOT”, “REQUIRED”, “SHALL”, “SHALL NOT”,
+“SHOULD”, “SHOULD NOT”, “RECOMMENDED”, “MAY”, and “OPTIONAL” in this
+document are to be interpreted as described in RFC 2119.</p>
+<hr />
+<h2 id="threat-model">2. Threat Model</h2>
+<p>WCAP is designed to protect against the following threats:</p>
+<ul>
+<li><strong>Content Injection/Modification:</strong> A malicious actor
+alters content in transit.</li>
+<li><strong>Compromised Infrastructure:</strong> A CDN, reverse proxy,
+or hosting server is compromised.</li>
+<li><strong>DNS Manipulation:</strong> An adversary reroutes traffic to
+a malicious server.</li>
+<li><strong>TLS Interception:</strong> A rogue or coerced CA enables a
+man-in-the-middle.</li>
+<li><strong>Censorship and Takedowns:</strong> A government forces a
+platform to alter or remove content.</li>
+<li><strong>Signer Coercion:</strong> A publisher is forced to hand over
+their private signing keys.</li>
+<li><strong>Provenance Ambiguity:</strong> A Signer forwards content
+from an untrusted or unverified upstream source without disclosing this
+to the Verifier, causing the Verifier to incorrectly infer that the
+Signer vouches for the content’s origin. The Signing Policy mechanism
+(Section 13) addresses this threat by making the Signer’s verification
+posture explicit.</li>
+</ul>
+<hr />
+<h2 id="terminology">3. Terminology</h2>
+<ul>
+<li><strong>Resource</strong>: Any HTTP-delivered content (HTML, JS,
+images, JSON, etc.)</li>
+<li><strong>Signer</strong>: The server or entity that holds a private
+key and signs Resources.</li>
+<li><strong>Verifier</strong>: The client or tool that retrieves and
+verifies the Signature using the Signer’s public key.</li>
+<li><strong>Signature</strong>: The result of signing a Resource body
+with a private key.</li>
+<li><strong>Public Key URI</strong>: A URI where the Signer’s public key
+is published.</li>
+<li><strong>Signing Policy</strong>: A declared assurance level
+indicating what the Signer verified about the content before signing.
+Expressed as a registered token in the <code>policy</code> parameter of
+the <code>Content-Signature</code> header (Section 13).</li>
+</ul>
+<hr />
+<h2 id="quick-start">4. Quick Start</h2>
+<h3 id="example-p-256-default-suite">4.1 Example: P-256 (Default
+Suite)</h3>
+<p><strong>Step 1: Generate a Key Pair</strong></p>
+<pre><code>openssl ecparam -name prime256v1 -genkey -noout -out private-key.pem  
+openssl ec -in private-key.pem -pubout -out public-key.pem  </code></pre>
+<p><strong>Step 2: Sign Your Content</strong></p>
+<pre><code>openssl dgst -sha256 -sign private-key.pem -out signature.bin message.txt  
+openssl base64 -in signature.bin -out signature.b64  </code></pre>
+<p><strong>Step 3: Serve Content with <code>Content-Signature</code>
+Header</strong></p>
+<pre><code>Content-Signature: alg=ecdsa-p256-sha256; key_uri=/.well-known/wcap-public-key.pem; sig=&lt;base64 signature&gt;</code></pre>
+<p>Ensure the public key is served at the path specified in
+<code>key_uri</code>.</p>
+<h3 id="example-dd-ecies-secp256k1-suite">4.2 Example: DD-ECIES
+(secp256k1 Suite)</h3>
+<p>This example demonstrates signing content using the
+<code>dd-ecies-secp256k1-sha256</code> algorithm suite. The signature
+uses ECDSA over secp256k1 with SHA-256, producing a 64-byte compact
+signature as defined in the DD-ECIES specification.</p>
+<p><strong>Step 1: Generate a secp256k1 Key Pair</strong></p>
+<pre><code># Generate a secp256k1 private key
+openssl ecparam -name secp256k1 -genkey -noout -out private-key-secp256k1.pem
+
+# Extract the compressed public key in PEM format
+openssl ec -in private-key-secp256k1.pem -pubout -conv_form compressed -out public-key-secp256k1.pem</code></pre>
+<p>The public key MUST be a 33-byte compressed secp256k1 key (0x02 or
+0x03 prefix byte) encoded in PEM format.</p>
+<p><strong>Step 2: Sign Your Content</strong></p>
+<p>Compute the SHA-256 hash of the content, then sign the hash using
+ECDSA with deterministic nonce generation (RFC 6979). The resulting
+signature MUST be a 64-byte compact format:
+<code>r (32 bytes) || s (32 bytes)</code>, with no DER encoding.</p>
+<pre><code># Compute SHA-256 hash and sign with ECDSA-secp256k1
+# Note: openssl produces DER-encoded signatures by default.
+# A DD-ECIES-compatible tool or library must be used to produce
+# the 64-byte compact (r || s) signature format.
+openssl dgst -sha256 -sign private-key-secp256k1.pem -out signature-der.bin message.txt
+
+# Convert DER signature to 64-byte compact (r || s) format and base64-encode.
+# This step requires a tool that extracts the raw r and s integers from the
+# DER encoding and concatenates them as 32-byte big-endian values.
+# Example using a DD-ECIES library:
+#   dd-ecies sign --key private-key-secp256k1.pem --input message.txt --output signature.b64</code></pre>
+<p><strong>Step 3: Serve Content with <code>Content-Signature</code>
+Header</strong></p>
+<pre><code>Content-Signature: alg=dd-ecies-secp256k1-sha256; key_uri=/.well-known/wcap-public-key-secp256k1.pem; sig=&lt;base64 compact signature&gt;</code></pre>
+<p>Optionally include a <code>kid</code> parameter to identify the key
+when the signer publishes multiple keys:</p>
+<pre><code>Content-Signature: alg=dd-ecies-secp256k1-sha256; key_uri=/.well-known/wcap-public-key-secp256k1.pem; sig=&lt;base64 compact signature&gt;; kid=secp256k1-2025</code></pre>
+<p>Ensure the compressed secp256k1 public key is served at the path
+specified in <code>key_uri</code>. See the Algorithm Suite Registry
+(Section 12) for full suite details and the DD-ECIES specification for
+the compact signature format.</p>
+<hr />
+<h2 id="protocol-flow">5. Protocol Flow</h2>
+<ol type="1">
+<li>The Verifier requests a Resource.</li>
+<li>The Signer generates the Resource body and its Signature.</li>
+<li>The Signer returns the Resource with the
+<code>Content-Signature</code> HTTP header.</li>
+<li>The Verifier retrieves the public key from
+<code>key_uri</code>.</li>
+<li>The Verifier checks the Signature against the Resource body.</li>
+</ol>
+<p>If verification succeeds, the Resource is authentic. If it fails, the
+Resource is potentially tampered with.</p>
+<hr />
+<h2 id="server-signer-requirements">6. Server (Signer) Requirements</h2>
+<h3 id="key-management">6.1 Key Management</h3>
+<ul>
+<li>MUST generate and securely store a public/private key pair.</li>
+<li>RECOMMENDED algorithm: ECDSA (P-256 with SHA-256).</li>
+<li>MAY support other modern, secure digital signature algorithms.</li>
+<li>SHOULD rotate keys periodically and expose metadata for revocation
+and validity.</li>
+</ul>
+<h3 id="public-key-publication">6.2 Public Key Publication</h3>
+<ul>
+<li><p>MUST publish public key at a stable <code>key_uri</code>, such
+as:</p>
+<pre><code>/.well-known/wcap-public-key.pem</code></pre></li>
+<li><p>MUST serve it over HTTPS with a valid certificate.</p></li>
+<li><p>Public key MUST be in PEM format.</p></li>
+<li><p>MAY include a revocation URI and expiration metadata inside the
+PEM file.</p></li>
+</ul>
+<h3 id="the-content-signature-header">6.3 The
+<code>Content-Signature</code> Header</h3>
+<p>Header format:</p>
+<pre><code>Content-Signature: alg=&lt;algorithm&gt;; key_uri=&lt;uri&gt;; sig=&lt;base64 signature&gt;[; kid=&lt;key-id&gt;][; policy=&lt;policy-token&gt;]</code></pre>
+<h4 id="parameters">6.3.1 Parameters</h4>
+<ul>
+<li><code>alg</code>: REQUIRED. Algorithm suite identifier. MUST be a
+registered Algorithm Suite identifier from the Algorithm Suite Registry
+(Section 12). Valid values include:
+<ul>
+<li><code>ecdsa-p256-sha256</code> — ECDSA with P-256 and SHA-256
+(default suite).</li>
+<li><code>dd-ecies-secp256k1-sha256</code> — ECDSA with secp256k1 and
+SHA-256, as defined in the DD-ECIES specification.</li>
+</ul></li>
+<li><code>key_uri</code>: REQUIRED. Public key location (relative or
+absolute URI). The key served at this URI MUST be in PEM format and MUST
+conform to the key format specified by the algorithm suite.</li>
+<li><code>sig</code>: REQUIRED. Base64-encoded digital signature of the
+<em>exact response body</em>. The signature encoding and size MUST
+conform to the signature format specified by the algorithm suite.</li>
+<li><code>kid</code>: OPTIONAL. Key ID string identifying which key the
+signer used. This parameter supports signers that publish multiple keys
+(e.g., for different algorithm suites or key rotation). When present,
+verifiers SHOULD use the <code>kid</code> value to select the
+appropriate public key for verification.</li>
+<li><code>policy</code>: OPTIONAL. Signing policy token declaring what
+the Signer verified about the content before signing. MUST be a
+registered token from the Signing Policy Registry (Section 13). When
+absent, verifiers MUST treat the signature as making no claim beyond
+transport integrity. See Section 13 for registered policy tokens and
+their semantics.</li>
+</ul>
+<h4 id="algorithm-specific-requirements">6.3.2 Algorithm-Specific
+Requirements</h4>
+<h5 id="default-suite-ecdsa-p256-sha256">Default Suite
+(<code>ecdsa-p256-sha256</code>)</h5>
+<p>When <code>alg=ecdsa-p256-sha256</code>:</p>
+<ul>
+<li>The <code>sig</code> field MUST contain a base64-encoded DER-encoded
+ECDSA signature.</li>
+<li>The public key served at <code>key_uri</code> MUST be an
+uncompressed P-256 public key in PEM format.</li>
+</ul>
+<h5 id="dd-ecies-suite-dd-ecies-secp256k1-sha256">DD-ECIES Suite
+(<code>dd-ecies-secp256k1-sha256</code>)</h5>
+<p>When <code>alg=dd-ecies-secp256k1-sha256</code>:</p>
+<ul>
+<li>The <code>sig</code> field MUST contain a base64-encoded 64-byte
+compact ECDSA signature in the format
+<code>r(32 bytes) || s(32 bytes)</code>, as defined in the DD-ECIES
+specification (Section: Signature Scheme).</li>
+<li>The public key served at <code>key_uri</code> MUST be a 33-byte
+compressed secp256k1 public key (0x02 or 0x03 prefix byte) encoded in
+PEM format.</li>
+</ul>
+<hr />
+<h2 id="client-verifier-requirements">7. Client (Verifier)
+Requirements</h2>
+<h3 id="signature-discovery">7.1 Signature Discovery</h3>
+<ul>
+<li>MUST check for a <code>Content-Signature</code> header in HTTP
+responses.</li>
+</ul>
+<h3 id="public-key-retrieval-and-caching">7.2 Public Key Retrieval and
+Caching</h3>
+<ul>
+<li>MUST fetch public key from <code>key_uri</code> (HTTPS
+RECOMMENDED).</li>
+<li>SHOULD cache keys securely for performance.</li>
+<li>MAY allow preloading or pinning of trusted keys.</li>
+</ul>
+<h3 id="verification-logic">7.3 Verification Logic</h3>
+<p>The Verifier MUST:</p>
+<ol type="1">
+<li>Parse the <code>Content-Signature</code> header.</li>
+<li>Retrieve and cache the public key.</li>
+<li>Verify the decoded <code>sig</code> against the exact body of the
+response.</li>
+</ol>
+<h3 id="handling-verification-failure">7.4 Handling Verification
+Failure</h3>
+<ul>
+<li>MUST NOT render or use the resource.</li>
+<li>SHOULD display a clear integrity warning or error.</li>
+</ul>
+<hr />
+<h2 id="considerations-for-specific-resource-types">8. Considerations
+for Specific Resource Types</h2>
+<h3 id="static-assets-javascript-css">8.1 Static Assets (JavaScript,
+CSS)</h3>
+<ul>
+<li>SHOULD continue to use Subresource Integrity (SRI) when
+possible.</li>
+<li>WCAP MAY be used as a fallback or enhancement to SRI.</li>
+</ul>
+<h3 id="websockets">8.2 WebSockets</h3>
+<p>To sign WebSocket messages:</p>
+<pre><code>{
+  &quot;payload&quot;: { ... },
+  &quot;signature&quot;: &quot;&lt;base64 signature of payload&gt;&quot;
+}</code></pre>
+<ul>
+<li>Every message MUST be signed individually.</li>
+<li>Receiver MUST verify before acting on the message.</li>
+</ul>
+<hr />
+<h2 id="security-considerations">9. Security Considerations</h2>
+<ul>
+<li><strong>Key Compromise</strong>: MUST allow for key rotation and
+revocation.</li>
+<li><strong>Replay Attacks</strong>: Resources MAY include timestamps or
+nonces.</li>
+<li><strong>Initial Trust</strong>: Relies on HTTPS or DNSSEC for the
+first key fetch.</li>
+<li><strong>Signature Stripping</strong>: Client SHOULD treat unsigned
+content as untrusted when a signature is expected.</li>
+<li><strong>Header Binding (Optional)</strong>: Future versions MAY
+support binding signature to additional headers (e.g., MIME types,
+CSP).</li>
+</ul>
+<hr />
+<h2 id="privacy-considerations">10. Privacy Considerations</h2>
+<ul>
+<li>Public key fetches can expose access patterns. To reduce this:
+<ul>
+<li>Verifiers SHOULD cache keys aggressively.</li>
+<li>Verifiers MAY pre-fetch public keys for known hosts.</li>
+<li>Alternative key distribution (e.g., IPFS, blockchain, DNSSEC) MAY
+enhance privacy and resilience.</li>
+</ul></li>
+</ul>
+<hr />
+<h2 id="future-extensions-non-normative">11. Future Extensions
+(Non-normative)</h2>
+<ul>
+<li>Verifiable streaming content using Merkle trees.</li>
+<li>Multi-signature schemes or endorsement chains.</li>
+<li>Web browser integration (e.g., extensions or native WCAP
+support).</li>
+<li>Blockchain-based or decentralized key registries.</li>
+<li>Cryptographic proof of signing policy compliance (e.g.,
+zero-knowledge proofs that decryption succeeded without revealing key
+material).</li>
+</ul>
+<hr />
+<h2 id="algorithm-suite-registry">12. Algorithm Suite Registry</h2>
+<h3 id="overview">12.1 Overview</h3>
+<p>WCAP supports pluggable algorithm suites, analogous to TLS cipher
+suites. An algorithm suite is a named combination of cryptographic
+algorithms — including an elliptic curve, signature algorithm, hash
+function, key format, and signature format — that signers and verifiers
+use to produce and verify content signatures.</p>
+<p>The <code>alg</code> parameter in the <code>Content-Signature</code>
+header is the sole mechanism for algorithm negotiation. The core
+protocol logic MUST NOT contain algorithm-specific behavior; all
+algorithm-dependent details are encapsulated within the suite
+definition. This design ensures that new algorithm suites MAY be
+registered by defining the required fields in this registry without
+modifying the core protocol sections (Sections 5–7).</p>
+<h3 id="registry-structure">12.2 Registry Structure</h3>
+<p>Each algorithm suite entry in the registry MUST include the following
+fields:</p>
+<table>
+<colgroup>
+<col style="width: 26%" />
+<col style="width: 23%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Identifier</strong></td>
+<td>string</td>
+<td>The token used as the <code>alg</code> parameter value in the
+<code>Content-Signature</code> header.</td>
+</tr>
+<tr>
+<td><strong>Curve</strong></td>
+<td>string</td>
+<td>The elliptic curve used for key generation and cryptographic
+operations.</td>
+</tr>
+<tr>
+<td><strong>Signature Algorithm</strong></td>
+<td>string</td>
+<td>The digital signature algorithm.</td>
+</tr>
+<tr>
+<td><strong>Hash Algorithm</strong></td>
+<td>string</td>
+<td>The hash function used for message digests.</td>
+</tr>
+<tr>
+<td><strong>Key Format</strong></td>
+<td>string</td>
+<td>The encoding and size of the public key served at
+<code>key_uri</code>.</td>
+</tr>
+<tr>
+<td><strong>Signature Format</strong></td>
+<td>string</td>
+<td>The encoding and size of the signature in the <code>sig</code>
+parameter.</td>
+</tr>
+<tr>
+<td><strong>Reference</strong></td>
+<td>string</td>
+<td>The defining specification or standard for this suite.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="registered-algorithm-suites">12.3 Registered Algorithm
+Suites</h3>
+<h4 id="ecdsa-p256-sha256-default">12.3.1 <code>ecdsa-p256-sha256</code>
+(Default)</h4>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Identifier</strong></td>
+<td><code>ecdsa-p256-sha256</code></td>
+</tr>
+<tr>
+<td><strong>Curve</strong></td>
+<td>P-256 (secp256r1), as defined in FIPS 186-4</td>
+</tr>
+<tr>
+<td><strong>Signature Algorithm</strong></td>
+<td>ECDSA</td>
+</tr>
+<tr>
+<td><strong>Hash Algorithm</strong></td>
+<td>SHA-256</td>
+</tr>
+<tr>
+<td><strong>Key Format</strong></td>
+<td>PEM-encoded uncompressed P-256 public key</td>
+</tr>
+<tr>
+<td><strong>Signature Format</strong></td>
+<td>DER-encoded ECDSA signature, base64</td>
+</tr>
+<tr>
+<td><strong>Reference</strong></td>
+<td>FIPS 186-4, RFC 6979</td>
+</tr>
+</tbody>
+</table>
+<p>This is the default algorithm suite. All conforming verifiers MUST
+support this suite.</p>
+<h4 id="dd-ecies-secp256k1-sha256">12.3.2
+<code>dd-ecies-secp256k1-sha256</code></h4>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Identifier</strong></td>
+<td><code>dd-ecies-secp256k1-sha256</code></td>
+</tr>
+<tr>
+<td><strong>Curve</strong></td>
+<td>secp256k1, as defined in SEC 2 section 2.4.1</td>
+</tr>
+<tr>
+<td><strong>Signature Algorithm</strong></td>
+<td>ECDSA with deterministic nonce generation per RFC 6979</td>
+</tr>
+<tr>
+<td><strong>Hash Algorithm</strong></td>
+<td>SHA-256</td>
+</tr>
+<tr>
+<td><strong>Key Format</strong></td>
+<td>PEM-encoded 33-byte compressed secp256k1 public key (0x02/0x03
+prefix)</td>
+</tr>
+<tr>
+<td><strong>Signature Format</strong></td>
+<td>64-byte compact signature (r || s, 32 bytes each),
+base64-encoded</td>
+</tr>
+<tr>
+<td><strong>Reference</strong></td>
+<td>DD-ECIES: Digital Defiance Elliptic Curve Integrated Encryption
+Scheme, Version 1.0</td>
+</tr>
+</tbody>
+</table>
+<p>Conforming verifiers SHOULD support this suite.</p>
+<h3 id="algorithm-suite-negotiation">12.4 Algorithm Suite
+Negotiation</h3>
+<p>The <code>alg</code> parameter in the <code>Content-Signature</code>
+header (Section 6.3) is the sole negotiation mechanism for algorithm
+suites. A signer selects an algorithm suite and sets the
+<code>alg</code> parameter to the corresponding identifier. The verifier
+uses the <code>alg</code> value to determine which cryptographic
+operations to apply during signature verification.</p>
+<p>The core protocol (Sections 5–7) MUST NOT contain algorithm-specific
+behavior. All algorithm-dependent logic — including key parsing, hash
+computation, and signature verification — MUST be delegated to the suite
+definition.</p>
+<h3 id="handling-unrecognized-algorithm-suites">12.5 Handling
+Unrecognized Algorithm Suites</h3>
+<p>When a verifier encounters an <code>alg</code> value in the
+<code>Content-Signature</code> header that does not match any registered
+algorithm suite identifier, the verifier:</p>
+<ol type="1">
+<li>MUST reject the signature.</li>
+<li>SHOULD report the unsupported algorithm in a diagnostic message or
+log entry, including the unrecognized <code>alg</code> value.</li>
+<li>MUST NOT attempt to verify the signature using a different algorithm
+suite.</li>
+</ol>
+<h3 id="extensibility">12.6 Extensibility</h3>
+<p>New algorithm suites MAY be registered by adding an entry to this
+registry with all required fields (Section 12.2). Registration of a new
+suite MUST NOT require modifications to the core protocol sections
+(Sections 5–7).</p>
+<h3 id="verifier-support-requirements">12.7 Verifier Support
+Requirements</h3>
+<ul>
+<li>Verifiers MUST support the <code>ecdsa-p256-sha256</code>
+suite.</li>
+<li>Verifiers SHOULD support the <code>dd-ecies-secp256k1-sha256</code>
+suite.</li>
+<li>Verifiers MAY support additional registered suites.</li>
+</ul>
+<hr />
+<h2 id="signing-policy-declarations">13. Signing Policy
+Declarations</h2>
+<h3 id="overview-1">13.1 Overview</h3>
+<p>A WCAP signature cryptographically proves that the Signer held the
+private key corresponding to the published public key and that the
+signed bytes were not altered after signing. It does not, by itself, say
+anything about what the Signer verified about the content
+<em>before</em> signing.</p>
+<p>For many deployments this distinction matters. A Signer that
+retrieves content from encrypted block storage, a third-party origin, or
+a peer-to-peer network may have verified the content’s integrity and
+provenance before serving it — or it may have forwarded bytes without
+any such check. A verifier that cares about provenance, not just
+transport integrity, needs a way to distinguish these cases.</p>
+<p>The <code>policy</code> parameter in the
+<code>Content-Signature</code> header (Section 6.3.1) allows a Signer to
+declare, as part of the signed response, what it verified before
+signing. The declaration is a registered token from the Signing Policy
+Registry defined in this section.</p>
+<p><strong>Important limitation:</strong> A signing policy declaration
+is a <em>self-asserted claim</em> by the Signer. It is not
+cryptographically provable by the Verifier. Verifiers that rely on
+policy declarations MUST establish trust in the Signer’s honesty through
+out-of-band means (e.g., audits, published signing policy documentation,
+or reputation). The <code>policy</code> parameter is a transparency
+mechanism, not a proof mechanism.</p>
+<h3 id="registry-structure-1">13.2 Registry Structure</h3>
+<p>Each entry in the Signing Policy Registry MUST include the following
+fields:</p>
+<table>
+<colgroup>
+<col style="width: 26%" />
+<col style="width: 23%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Token</strong></td>
+<td>string</td>
+<td>The value used as the <code>policy</code> parameter in the
+<code>Content-Signature</code> header. MUST consist only of lowercase
+ASCII letters, digits, and hyphens.</td>
+</tr>
+<tr>
+<td><strong>Name</strong></td>
+<td>string</td>
+<td>A short human-readable name for the policy.</td>
+</tr>
+<tr>
+<td><strong>Assurance Level</strong></td>
+<td>integer</td>
+<td>A numeric ordering from 0 (no claim) to 3 (strongest claim),
+allowing verifiers to enforce a minimum assurance level.</td>
+</tr>
+<tr>
+<td><strong>Description</strong></td>
+<td>string</td>
+<td>A normative description of what the Signer MUST have verified before
+signing under this policy.</td>
+</tr>
+<tr>
+<td><strong>Example Use Case</strong></td>
+<td>string</td>
+<td>A non-normative example of a system that would use this policy.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="registered-signing-policies">13.3 Registered Signing
+Policies</h3>
+<h4 id="none-assurance-level-0">13.3.1 <code>none</code> (Assurance
+Level 0)</h4>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Token</strong></td>
+<td><code>none</code></td>
+</tr>
+<tr>
+<td><strong>Name</strong></td>
+<td>No Policy Claim</td>
+</tr>
+<tr>
+<td><strong>Assurance Level</strong></td>
+<td>0</td>
+</tr>
+<tr>
+<td><strong>Description</strong></td>
+<td>The Signer makes no claim about what was verified before signing.
+The signature attests only to transport integrity: the bytes were not
+modified after the Signer produced the response. This is equivalent to
+omitting the <code>policy</code> parameter entirely.</td>
+</tr>
+<tr>
+<td><strong>Example Use Case</strong></td>
+<td>A reverse proxy that signs all outbound responses without inspecting
+content.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="content-verified-assurance-level-1">13.3.2
+<code>content-verified</code> (Assurance Level 1)</h4>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Token</strong></td>
+<td><code>content-verified</code></td>
+</tr>
+<tr>
+<td><strong>Name</strong></td>
+<td>Content Verified</td>
+</tr>
+<tr>
+<td><strong>Assurance Level</strong></td>
+<td>1</td>
+</tr>
+<tr>
+<td><strong>Description</strong></td>
+<td>The Signer verified that the content was retrievable and well-formed
+before signing. The Signer MUST have successfully fetched or
+reconstructed the content from its authoritative source (e.g., a
+database, object store, or block storage system) and confirmed that the
+retrieval did not produce an error. The Signer makes no claim about the
+content’s origin or ownership.</td>
+</tr>
+<tr>
+<td><strong>Example Use Case</strong></td>
+<td>A file server that reads from a local disk and confirms the file
+exists and is readable before signing the response.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="origin-verified-assurance-level-2">13.3.3
+<code>origin-verified</code> (Assurance Level 2)</h4>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Token</strong></td>
+<td><code>origin-verified</code></td>
+</tr>
+<tr>
+<td><strong>Name</strong></td>
+<td>Origin Verified</td>
+</tr>
+<tr>
+<td><strong>Assurance Level</strong></td>
+<td>2</td>
+</tr>
+<tr>
+<td><strong>Description</strong></td>
+<td>The Signer verified that the content was retrieved from a known,
+trusted origin and that the retrieval was authenticated. The Signer MUST
+have confirmed the identity of the upstream source (e.g., via a verified
+signature, authenticated storage credential, or cryptographic
+commitment) before signing. The Signer makes no claim about the
+content’s semantic validity or ownership by a specific end user.</td>
+</tr>
+<tr>
+<td><strong>Example Use Case</strong></td>
+<td>A CDN edge node that fetches content from an origin server over a
+mutually authenticated TLS connection and verifies the origin’s identity
+certificate before signing the response.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="decryption-verified-assurance-level-3">13.3.4
+<code>decryption-verified</code> (Assurance Level 3)</h4>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Token</strong></td>
+<td><code>decryption-verified</code></td>
+</tr>
+<tr>
+<td><strong>Name</strong></td>
+<td>Decryption Verified</td>
+</tr>
+<tr>
+<td><strong>Assurance Level</strong></td>
+<td>3</td>
+</tr>
+<tr>
+<td><strong>Description</strong></td>
+<td>The Signer retrieved the content from encrypted storage,
+successfully decrypted it using the appropriate key material, and is
+signing the plaintext result. Successful decryption constitutes
+cryptographic proof of content integrity and authenticity: a ciphertext
+that decrypts without error under the correct key was produced by an
+entity that held that key and has not been tampered with since
+encryption. The Signer MUST NOT set this policy if decryption produced
+an error or if the content was served from a cache without re-verifying
+the ciphertext.</td>
+</tr>
+<tr>
+<td><strong>Example Use Case</strong></td>
+<td>A file-serving system that stores files as ECIES-encrypted blocks.
+Before signing the response, the server decrypts the block using the
+member’s key material. A successful decryption guarantees the block was
+encrypted by a legitimate participant and has not been corrupted or
+substituted.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="signer-requirements">13.4 Signer Requirements</h3>
+<p>When a Signer includes a <code>policy</code> parameter in the
+<code>Content-Signature</code> header:</p>
+<ol type="1">
+<li>The Signer MUST have performed all verifications described in the
+policy’s normative description before signing.</li>
+<li>The Signer MUST NOT assert a policy token for verifications it did
+not perform.</li>
+<li>The Signer SHOULD document its signing policy publicly (e.g., in a
+<code>/.well-known/wcap-signing-policy.json</code> resource) so that
+verifiers can audit the claim.</li>
+<li>If the Signer cannot complete the required verifications for a given
+policy (e.g., decryption fails), the Signer MUST either omit the
+<code>policy</code> parameter, use a lower-assurance policy token, or
+omit the <code>Content-Signature</code> header entirely.</li>
+</ol>
+<h3 id="verifier-requirements">13.5 Verifier Requirements</h3>
+<p>When a Verifier processes a <code>Content-Signature</code> header
+containing a <code>policy</code> parameter:</p>
+<ol type="1">
+<li>The Verifier MUST first verify the cryptographic signature as
+defined in Section 7.3. A valid signature is a prerequisite for trusting
+any policy claim.</li>
+<li>The Verifier MAY enforce a minimum assurance level. If the declared
+policy’s assurance level is below the Verifier’s required minimum, the
+Verifier SHOULD treat the response as if no policy was declared.</li>
+<li>The Verifier MUST NOT treat a policy declaration as cryptographic
+proof of the claimed verifications. Policy compliance is a declaration
+of intent and practice, not a provable property.</li>
+<li>When a <code>policy</code> parameter contains an unrecognized token,
+the Verifier SHOULD treat it as assurance level 0 (<code>none</code>)
+and MAY log a diagnostic warning.</li>
+</ol>
+<h3 id="example-header-with-policy">13.6 Example Header with Policy</h3>
+<pre><code>Content-Signature: alg=dd-ecies-secp256k1-sha256; key_uri=/.well-known/wcap-public-key-secp256k1.pem; sig=&lt;base64 compact signature&gt;; policy=decryption-verified</code></pre>
+<p>This header declares that the Signer used the
+<code>dd-ecies-secp256k1-sha256</code> algorithm suite, the content was
+retrieved from encrypted storage and successfully decrypted before
+signing, and the signature covers the exact plaintext bytes in the
+response body.</p>
+<h3 id="extensibility-1">13.7 Extensibility</h3>
+<p>New signing policy tokens MAY be registered by adding an entry to
+this registry with all required fields (Section 13.2). Registration of a
+new policy MUST NOT require modifications to the core protocol sections
+(Sections 5–7) or the Algorithm Suite Registry (Section 12). Policy
+tokens are independent of algorithm suites; any policy MAY be combined
+with any algorithm suite.</p>
+<hr />
+<h2 id="license">License</h2>
+<p>This specification is published under the MIT License. (C) 2024–2026
+Digital Defiance. Contributions welcome via GitHub.</p>
